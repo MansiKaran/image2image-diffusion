@@ -1,19 +1,42 @@
 from flask import Flask, request, jsonify
 from diffusion_service import diffusion_service
 import os
+from google.auth.transport import requests
+from google.oauth2 import id_token
 
 app = Flask(__name__)
 
-# API Key for authentication (in production, use environment variables)
-API_KEY = os.getenv('API_KEY', 'your-secret-api-key-here')
+# OAuth2 configuration
+CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '475710976485-your-client-id.apps.googleusercontent.com')
 
-def require_api_key(f):
-    """Decorator to require API key authentication"""
+def require_oauth2(f):
+    """Decorator to require OAuth2 authentication"""
     def decorated_function(*args, **kwargs):
-        # Check for API key in headers
-        api_key = request.headers.get('X-API-Key')
-        if not api_key or api_key != API_KEY:
-            return jsonify({'error': 'Invalid or missing API key'}), 401
+        # Get the Authorization header (case insensitive)
+        auth_header = request.headers.get('Authorization') or request.headers.get('authorization')
+        if not auth_header:
+            return jsonify({'error': 'Missing Authorization header', 'headers': dict(request.headers)}), 401
+        if not auth_header.lower().startswith('bearer '):
+            return jsonify({'error': 'Invalid Authorization header format', 'header': auth_header}), 401
+        
+        # Extract the token
+        token = auth_header.split(' ')[1]
+        
+        try:
+            # Verify the Google ID token with Client ID
+            idinfo = id_token.verify_oauth2_token(token, requests.Request(), CLIENT_ID)
+            
+            # Check if the token is valid
+            if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
+                raise ValueError('Wrong issuer.')
+            
+            # Store user info in request context for later use
+            request.user_info = idinfo
+            
+        except Exception as e:
+            # More detailed error logging
+            return jsonify({'error': f'Token verification failed: {str(e)}', 'token_preview': token[:50] + '...', 'client_id': CLIENT_ID}), 401
+        
         return f(*args, **kwargs)
     decorated_function.__name__ = f.__name__
     return decorated_function
@@ -23,13 +46,14 @@ def hello():
     return jsonify({
         "message": "Image2Image Diffusion Service",
         "status": "running",
+        "authentication": "OAuth2 (Google)",
         "endpoints": {
-            "generate": "/generate (POST) - Requires X-API-Key header"
+            "generate": "/generate (POST) - Requires Authorization: Bearer <token> header"
         }
     })
 
 @app.route('/generate', methods=['POST'])
-@require_api_key
+@require_oauth2
 def generate():
     data = request.get_json()
     prompt = data.get('prompt', 'a cat')
@@ -43,7 +67,18 @@ def generate():
     
     return jsonify({
         "images": images,
-        "random_seed": used_seed
+        "random_seed": used_seed,
+        "user": getattr(request, 'user_info', {}).get('email', 'unknown')
+    })
+
+@app.route('/test-auth', methods=['POST'])
+@require_oauth2
+def test_auth():
+    """Test endpoint to verify OAuth2 authentication"""
+    return jsonify({
+        "message": "OAuth2 authentication successful!",
+        "user": getattr(request, 'user_info', {}).get('email', 'unknown'),
+        "user_info": getattr(request, 'user_info', {})
     })
 
 if __name__ == '__main__':
